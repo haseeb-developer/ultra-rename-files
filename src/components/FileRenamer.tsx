@@ -1,4 +1,10 @@
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, {
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+  useMemo,
+} from "react";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -7,8 +13,18 @@ import {
   FiDownload,
   FiCheck,
   FiClock,
-  FiFile,
+  FiImage,
+  FiVideo,
+  FiMusic,
+  FiFolder,
   FiAlertCircle,
+  FiTrash2,
+  FiGrid,
+  FiFileText,
+  FiEdit3,
+  FiFile,
+  FiBook,
+  FiTable,
 } from "react-icons/fi";
 import JSZip from "jszip";
 
@@ -36,9 +52,12 @@ interface HistoryEntry {
   fileType: string;
 }
 
-interface JSZipMetadata {
-  percent: number;
-  currentFile: string;
+// Toast interface
+interface Toast {
+  id: string;
+  message: string;
+  type: "success" | "error" | "loading";
+  duration?: number;
 }
 
 const FileRenamer: React.FC = () => {
@@ -52,7 +71,31 @@ const FileRenamer: React.FC = () => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const progressIntervals = useRef<{ [key: string]: NodeJS.Timeout }>({});
+  const [selectedFileType, setSelectedFileType] = useState<string>("all");
+
+  // Toast functions
+  const showToast = (
+    message: string,
+    type: Toast["type"],
+    duration: number = 3000
+  ) => {
+    const id = Math.random().toString(36).substr(2, 9);
+    const newToast: Toast = { id, message, type, duration };
+    setToasts((prev) => [...prev, newToast]);
+
+    if (type !== "loading") {
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, duration);
+    }
+    return id;
+  };
+
+  const removeToast = (id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  };
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -89,14 +132,66 @@ const FileRenamer: React.FC = () => {
     };
   }, [files]);
 
+  // Group files by type
+  const fileGroups = useMemo(() => {
+    const groups: { [key: string]: FileWithPreview[] } = {
+      images: files.filter((f) => f.type.startsWith("image/")),
+      videos: files.filter((f) => f.type.startsWith("video/")),
+      audio: files.filter((f) => f.type.startsWith("audio/")),
+      documents: files.filter(
+        (f) =>
+          f.type.includes("pdf") ||
+          f.type.includes("word") ||
+          f.type.includes("excel") ||
+          f.type.includes("text/plain")
+      ),
+      others: files.filter(
+        (f) =>
+          !f.type.startsWith("image/") &&
+          !f.type.startsWith("video/") &&
+          !f.type.startsWith("audio/") &&
+          !f.type.includes("pdf") &&
+          !f.type.includes("word") &&
+          !f.type.includes("excel") &&
+          !f.type.includes("text/plain")
+      ),
+    };
+    return groups;
+  }, [files]);
+
+  // Get filtered files based on selected type
+  const filteredFiles = useMemo(() => {
+    if (selectedFileType === "all") return files;
+    return fileGroups[selectedFileType] || [];
+  }, [files, selectedFileType, fileGroups]);
+
+  // Get file type counts
+  const fileTypeCounts = useMemo(
+    () => ({
+      all: files.length,
+      images: fileGroups.images.length,
+      videos: fileGroups.videos.length,
+      audio: fileGroups.audio.length,
+      documents: fileGroups.documents.length,
+      others: fileGroups.others.length,
+    }),
+    [files, fileGroups]
+  );
+
   const getFileIcon = (fileType: string) => {
-    if (fileType.startsWith("image/")) return "🖼️";
-    if (fileType.startsWith("video/")) return "🎥";
-    if (fileType.startsWith("audio/")) return "🎵";
-    if (fileType.includes("pdf")) return "📄";
-    if (fileType.includes("word")) return "📝";
-    if (fileType.includes("excel")) return "📊";
-    return "📁";
+    if (fileType.startsWith("image/"))
+      return <FiImage className="w-6 h-6 text-blue-400" />;
+    if (fileType.startsWith("video/"))
+      return <FiVideo className="w-6 h-6 text-purple-400" />;
+    if (fileType.startsWith("audio/"))
+      return <FiMusic className="w-6 h-6 text-green-400" />;
+    if (fileType.includes("pdf"))
+      return <FiFileText className="w-6 h-6 text-red-400" />;
+    if (fileType.includes("word"))
+      return <FiBook className="w-6 h-6 text-blue-500" />;
+    if (fileType.includes("excel"))
+      return <FiTable className="w-6 h-6 text-green-500" />;
+    return <FiFile className="w-6 h-6 text-gray-400" />;
   };
 
   const getFileType = (file: File): string => {
@@ -209,12 +304,36 @@ const FileRenamer: React.FC = () => {
     },
   });
 
+  const handleClearAll = () => {
+    if (files.length === 0) {
+      showToast("No files to clear!", "error");
+      return;
+    }
+
+    // Clear all file previews
+    files.forEach((file) => {
+      if (file.preview) {
+        URL.revokeObjectURL(file.preview);
+      }
+    });
+
+    // Clear all intervals
+    Object.values(progressIntervals.current).forEach(clearInterval);
+    progressIntervals.current = {};
+
+    // Reset all state
+    setFiles([]);
+    setBaseFileName("");
+    setUploadProgress({});
+    setSelectedFileType("all");
+    showToast("All files cleared successfully!", "success");
+  };
+
   const handleRemoveFile = (index: number) => {
     const removedFile = files[index];
     if (removedFile.preview) {
       URL.revokeObjectURL(removedFile.preview);
     }
-    // Clear any ongoing progress simulation
     if (progressIntervals.current[removedFile.name]) {
       clearInterval(progressIntervals.current[removedFile.name]);
       delete progressIntervals.current[removedFile.name];
@@ -225,6 +344,7 @@ const FileRenamer: React.FC = () => {
       delete newProgress[removedFile.name];
       return newProgress;
     });
+    showToast(`Removed ${removedFile.name}`, "success");
   };
 
   const handleBaseNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -237,33 +357,38 @@ const FileRenamer: React.FC = () => {
 
   const handleRename = () => {
     if (!baseFileName) {
-      setError("Please enter a base name for the files.");
+      showToast("Please enter a base name for the files.", "error");
       return;
     }
 
-    if (files.length === 0) {
-      setError("No files to rename.");
+    if (filteredFiles.length === 0) {
+      showToast("No files to rename.", "error");
       return;
     }
 
     try {
       // First, create the new history entries
-      const historyEntries: HistoryEntry[] = files.map((file, index) => {
-        const extension = file.name.split(".").pop() || "";
-        const newName = `${baseFileName}_${index + 1}.${extension}`;
-        return {
-          timestamp: Date.now(),
-          oldName: file.name,
-          newName,
-          fileType: file.type, // file.type is already guaranteed to be a string from our CustomFile type
-        };
-      });
+      const historyEntries: HistoryEntry[] = filteredFiles.map(
+        (file, index) => {
+          const extension = file.name.split(".").pop() || "";
+          const newName = `${baseFileName}_${index + 1}.${extension}`;
+          return {
+            timestamp: Date.now(),
+            oldName: file.name,
+            newName,
+            fileType: file.type,
+          };
+        }
+      );
 
       // Update history once
       setHistory((prev) => [...historyEntries, ...prev.slice(0, 49)]);
 
       // Then update files with new names
-      const newFiles = files.map((file, index) => {
+      const newFiles = files.map((file) => {
+        if (!filteredFiles.includes(file)) return file;
+
+        const index = filteredFiles.indexOf(file);
         const extension = file.name.split(".").pop() || "";
         const newName = `${baseFileName}_${index + 1}.${extension}`;
         return {
@@ -276,54 +401,63 @@ const FileRenamer: React.FC = () => {
       setIsRenaming(true);
       setError(null);
       setTimeout(() => setIsRenaming(false), 1500);
+
+      showToast(
+        `Renamed ${filteredFiles.length} files successfully!`,
+        "success"
+      );
     } catch (err) {
       console.error("Rename error:", err);
-      setError(
+      showToast(
         err instanceof Error
           ? err.message
-          : "Failed to rename files. Please try again."
+          : "Failed to rename files. Please try again.",
+        "error"
       );
     }
   };
 
   const handleDownload = async () => {
     if (!baseFileName) {
-      setError("Please enter a base name for the files.");
+      showToast("Please enter a base name for the files.", "error");
       return;
     }
-    if (files.length === 0) {
-      setError("Please add some files first.");
+    if (filteredFiles.length === 0) {
+      showToast("Please add some files first.", "error");
       return;
     }
+
+    const toastId = showToast("Preparing files for download...", "loading");
 
     try {
       const zip = new JSZip();
       let totalSize = 0;
-      files.forEach((file) => (totalSize += file.size));
+      filteredFiles.forEach((file) => (totalSize += file.size));
       let processedSize = 0;
 
       setUploadProgress((prev) => ({ ...prev, download: 0 }));
 
       // Process files in chunks to prevent memory issues
       const chunkSize = 5; // Process 5 files at a time
-      for (let i = 0; i < files.length; i += chunkSize) {
-        const chunk = files.slice(i, i + chunkSize);
+      for (let i = 0; i < filteredFiles.length; i += chunkSize) {
+        const chunk = filteredFiles.slice(i, i + chunkSize);
         await Promise.all(
           chunk.map(async (file) => {
             try {
               const extension = file.name.split(".").pop() || "";
               const newName =
                 file.newName ||
-                `${baseFileName}_${files.indexOf(file) + 1}.${extension}`;
+                `${baseFileName}_${
+                  filteredFiles.indexOf(file) + 1
+                }.${extension}`;
 
-              // Read file as ArrayBuffer to handle large files better
               const arrayBuffer = await file.arrayBuffer();
               zip.file(newName, arrayBuffer);
 
               processedSize += file.size;
               setUploadProgress((prev) => ({
                 ...prev,
-                download: Math.min((processedSize / totalSize) * 100, 99), // Cap at 99% until final zip
+                download: Math.min((processedSize / totalSize) * 100, 99),
               }));
             } catch (err) {
               console.error(`Error processing file ${file.name}:`, err);
@@ -366,12 +500,16 @@ const FileRenamer: React.FC = () => {
       setTimeout(() => {
         setUploadProgress((prev) => ({ ...prev, download: 0 }));
       }, 1000);
+
+      showToast("Files downloaded successfully!", "success");
+      removeToast(toastId);
     } catch (err) {
       const errorMessage =
         err instanceof Error
           ? err.message
           : "Failed to create download. Please try again.";
-      setError(errorMessage);
+      showToast(errorMessage, "error");
+      removeToast(toastId);
       console.error("Download error:", err);
       setUploadProgress((prev) => ({ ...prev, download: 0 }));
     }
@@ -387,6 +525,64 @@ const FileRenamer: React.FC = () => {
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+      {/* Toast Container */}
+      <div className="fixed top-4 right-4 z-50 space-y-2">
+        <AnimatePresence>
+          {toasts.map((toast) => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, y: -20, scale: 0.8 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -20, scale: 0.8 }}
+              className={`p-4 rounded-lg shadow-lg flex items-center gap-2 min-w-[300px] ${
+                toast.type === "success"
+                  ? "bg-green-500 text-white"
+                  : toast.type === "error"
+                  ? "bg-red-500 text-white"
+                  : "bg-blue-500 text-white"
+              }`}
+            >
+              {toast.type === "success" && (
+                <FiCheck className="flex-shrink-0" />
+              )}
+              {toast.type === "error" && (
+                <FiAlertCircle className="flex-shrink-0" />
+              )}
+              {toast.type === "loading" && (
+                <svg
+                  className="animate-spin h-5 w-5 flex-shrink-0"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  />
+                </svg>
+              )}
+              <span className="flex-1">{toast.message}</span>
+              {toast.type !== "loading" && (
+                <button
+                  onClick={() => removeToast(toast.id)}
+                  className="text-white/80 hover:text-white"
+                >
+                  <FiX />
+                </button>
+              )}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
       {error && (
         <motion.div
           initial={{ opacity: 0, y: -10 }}
@@ -404,6 +600,24 @@ const FileRenamer: React.FC = () => {
           </button>
         </motion.div>
       )}
+
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+          <FiEdit3 className="text-primary" />
+          File Renamer
+        </h1>
+        {files.length > 0 && (
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={handleClearAll}
+            className="px-4 py-2 bg-red-500 text-white rounded-lg flex items-center gap-2 hover:bg-red-600"
+          >
+            <FiTrash2 />
+            Clear All
+          </motion.button>
+        )}
+      </div>
 
       <div {...getRootProps()}>
         <motion.div
@@ -431,49 +645,143 @@ const FileRenamer: React.FC = () => {
           animate={{ opacity: 1, y: 0 }}
           className="mt-8"
         >
-          <div className="flex flex-col sm:flex-row gap-4 mb-6">
-            <input
-              type="text"
-              placeholder="Enter base name for files..."
-              value={baseFileName}
-              onChange={handleBaseNameChange}
-              className="flex-1 px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 focus:border-primary focus:outline-none"
-            />
-            <div className="flex gap-2">
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={handleRename}
-                disabled={!baseFileName || files.length === 0}
-                className="px-6 py-2 bg-primary rounded-lg flex items-center gap-2 disabled:opacity-50"
+          <div className="flex flex-col gap-4 mb-6">
+            {/* File type filter */}
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setSelectedFileType("all")}
+                className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+                  selectedFileType === "all"
+                    ? "bg-primary text-white"
+                    : "bg-gray-700 hover:bg-gray-600"
+                }`}
               >
-                {isRenaming ? <FiCheck /> : "Rename Files"}
-              </motion.button>
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={handleDownload}
-                disabled={!baseFileName || files.length === 0}
-                className="px-6 py-2 bg-gradient-to-r from-primary to-secondary rounded-lg flex items-center gap-2 disabled:opacity-50"
-              >
-                <FiDownload />
-                Download All
-              </motion.button>
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setShowHistory(!showHistory)}
-                className="px-4 py-2 bg-gray-700 rounded-lg flex items-center gap-2"
-              >
-                <FiClock />
-              </motion.button>
+                <FiGrid />
+                All ({fileTypeCounts.all})
+              </button>
+              {fileTypeCounts.images > 0 && (
+                <button
+                  onClick={() => setSelectedFileType("images")}
+                  className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+                    selectedFileType === "images"
+                      ? "bg-primary text-white"
+                      : "bg-gray-700 hover:bg-gray-600"
+                  }`}
+                >
+                  <FiImage />
+                  Images ({fileTypeCounts.images})
+                </button>
+              )}
+              {fileTypeCounts.videos > 0 && (
+                <button
+                  onClick={() => setSelectedFileType("videos")}
+                  className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+                    selectedFileType === "videos"
+                      ? "bg-primary text-white"
+                      : "bg-gray-700 hover:bg-gray-600"
+                  }`}
+                >
+                  <FiVideo />
+                  Videos ({fileTypeCounts.videos})
+                </button>
+              )}
+              {fileTypeCounts.audio > 0 && (
+                <button
+                  onClick={() => setSelectedFileType("audio")}
+                  className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+                    selectedFileType === "audio"
+                      ? "bg-primary text-white"
+                      : "bg-gray-700 hover:bg-gray-600"
+                  }`}
+                >
+                  <FiMusic />
+                  Audio ({fileTypeCounts.audio})
+                </button>
+              )}
+              {fileTypeCounts.documents > 0 && (
+                <button
+                  onClick={() => setSelectedFileType("documents")}
+                  className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+                    selectedFileType === "documents"
+                      ? "bg-primary text-white"
+                      : "bg-gray-700 hover:bg-gray-600"
+                  }`}
+                >
+                  <FiFileText />
+                  Documents ({fileTypeCounts.documents})
+                </button>
+              )}
+              {fileTypeCounts.others > 0 && (
+                <button
+                  onClick={() => setSelectedFileType("others")}
+                  className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+                    selectedFileType === "others"
+                      ? "bg-primary text-white"
+                      : "bg-gray-700 hover:bg-gray-600"
+                  }`}
+                >
+                  <FiFolder />
+                  Others ({fileTypeCounts.others})
+                </button>
+              )}
+            </div>
+
+            {/* Rename controls */}
+            <div className="flex flex-col sm:flex-row gap-4 mt-4">
+              <div className="flex-1 relative">
+                <FiEdit3 className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Enter base name for files..."
+                  value={baseFileName}
+                  onChange={handleBaseNameChange}
+                  className="w-full pl-10 pr-4 py-2 rounded-lg bg-gray-700 border border-gray-600 focus:border-primary focus:outline-none"
+                />
+              </div>
+              <div className="flex gap-2">
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={handleRename}
+                  disabled={!baseFileName || filteredFiles.length === 0}
+                  className="px-6 py-2 bg-primary rounded-lg flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isRenaming ? <FiCheck /> : <FiEdit3 />}
+                  <span>
+                    Rename{" "}
+                    {selectedFileType !== "all" ? selectedFileType : "Files"}
+                  </span>
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={handleDownload}
+                  disabled={!baseFileName || filteredFiles.length === 0}
+                  className="px-6 py-2 bg-gradient-to-r from-primary to-secondary rounded-lg flex items-center gap-2 disabled:opacity-50"
+                >
+                  <FiDownload />
+                  <span>
+                    Download{" "}
+                    {selectedFileType !== "all" ? selectedFileType : "All"}
+                  </span>
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => setShowHistory(!showHistory)}
+                  className="px-4 py-2 bg-gray-700 rounded-lg flex items-center gap-2 hover:bg-gray-600"
+                >
+                  <FiClock />
+                  <span className="sr-only">History</span>
+                </motion.button>
+              </div>
             </div>
           </div>
 
-          {/* File Grid */}
+          {/* File Grid - Update to use filteredFiles */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <AnimatePresence>
-              {files.map((file, index) => (
+              {filteredFiles.map((file, index) => (
                 <motion.div
                   key={file.name}
                   initial={{ opacity: 0, scale: 0.8 }}
@@ -489,7 +797,9 @@ const FileRenamer: React.FC = () => {
                   </button>
 
                   <div className="flex items-start gap-3">
-                    <div className="text-2xl">{getFileIcon(file.type)}</div>
+                    <div className="flex-shrink-0">
+                      {getFileIcon(file.type)}
+                    </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm truncate mb-1">{file.name}</div>
                       {file.newName && (
@@ -537,7 +847,9 @@ const FileRenamer: React.FC = () => {
                       key={index}
                       className="flex items-center gap-3 text-sm p-2 hover:bg-gray-700 rounded"
                     >
-                      <span>{getFileIcon(entry.fileType)}</span>
+                      <div className="flex-shrink-0">
+                        {getFileIcon(entry.fileType)}
+                      </div>
                       <div className="flex-1">
                         <div className="text-gray-400">{entry.oldName}</div>
                         <div className="text-primary">→ {entry.newName}</div>
