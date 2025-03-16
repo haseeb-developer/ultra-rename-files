@@ -117,6 +117,8 @@ const FileRenamer: React.FC = () => {
 
   // Add constant for max file size (100MB in bytes)
   const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB in bytes
+  // Add constant for max files
+  const MAX_FILES = 20;
 
   // Toast functions
   const showToast = (
@@ -270,6 +272,19 @@ const FileRenamer: React.FC = () => {
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     try {
+      // Check if adding new files would exceed the limit
+      if (files.length + acceptedFiles.length > MAX_FILES) {
+        setError(
+          `Cannot add more than ${MAX_FILES} files at a time. Please process current files first.`
+        );
+        showToast(
+          `Maximum ${MAX_FILES} files allowed at a time. Please process current files first.`,
+          "error",
+          5000
+        );
+        return;
+      }
+
       // Validate file sizes first
       const oversizedFiles = acceptedFiles.filter(
         (file) => file.size > MAX_FILE_SIZE
@@ -803,7 +818,7 @@ const FileRenamer: React.FC = () => {
           <p className="text-lg">
             {isDragReject
               ? "File too large! Maximum size is 100MB"
-              : "Drag & drop files here, or click to select files"}
+              : `Drag & drop files here, or click to select files (max ${MAX_FILES} files)`}
           </p>
           <p className="text-sm text-gray-400 mt-2">
             Supports images, videos, documents, and more (max 100MB per file)
@@ -910,7 +925,10 @@ const FileRenamer: React.FC = () => {
                   className="w-full pl-10 pr-4 py-2 rounded-lg bg-gray-700 border border-gray-600 focus:border-primary focus:outline-none"
                 />
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
+                <div className="text-sm text-gray-400 bg-gray-700 px-3 py-2 rounded-lg">
+                  {filteredFiles.length}/{MAX_FILES} files
+                </div>
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -959,45 +977,109 @@ const FileRenamer: React.FC = () => {
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.8 }}
-                  className="relative p-4 rounded-lg bg-gray-700 group"
+                  whileHover={{ scale: 1.02 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 20 }}
+                  className="relative p-5 rounded-xl bg-gradient-to-br from-gray-700/50 to-gray-800/50 backdrop-blur-sm border border-gray-700/50 shadow-lg group"
                 >
                   <button
                     onClick={() => handleRemoveFile(index)}
-                    className="absolute top-2 right-2 p-1 rounded-full bg-red-500 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="absolute -top-2 -right-2 p-2 rounded-full bg-red-500 text-white opacity-0 group-hover:opacity-100 transition-all duration-200 transform group-hover:scale-110 shadow-lg hover:bg-red-600"
                   >
-                    <FiX />
+                    <FiX className="w-4 h-4" />
                   </button>
 
-                  <div className="flex items-start gap-3">
-                    <div className="flex-shrink-0">
+                  <div className="flex items-start gap-4">
+                    <motion.div
+                      className="flex-shrink-0 p-3 rounded-lg bg-gray-800/50 border border-gray-700/50"
+                      whileHover={{ rotate: [0, -10, 10, -10, 0] }}
+                      transition={{ duration: 0.5 }}
+                    >
                       {getFileIcon(file.type)}
-                    </div>
+                    </motion.div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm truncate mb-1">{file.name}</div>
-                      {file.newName && (
-                        <div className="text-xs text-primary truncate mb-1">
-                          → {file.newName}
+                      {file.newName ? (
+                        <div className="space-y-3">
+                          <div className="relative">
+                            <motion.div
+                              initial={{ opacity: 1 }}
+                              animate={{ opacity: 0.5 }}
+                              className="text-sm text-gray-400 line-through truncate transition-all duration-300"
+                            >
+                              {file.name}
+                            </motion.div>
+                            <motion.div
+                              initial={{ opacity: 0, y: -10 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="mt-2"
+                            >
+                              <div className="flex items-center gap-3">
+                                <motion.div
+                                  initial={{ height: 0 }}
+                                  animate={{ height: "100%" }}
+                                  className="w-0.5 bg-gradient-to-b from-primary via-primary/50 to-transparent"
+                                  style={{ height: "24px" }}
+                                />
+                                <div className="flex-1">
+                                  <motion.div
+                                    initial={{ opacity: 0, x: -10 }}
+                                    animate={{ opacity: 1, x: 0 }}
+                                    transition={{ delay: 0.2 }}
+                                    className="text-sm font-medium text-primary truncate bg-primary/5 px-3 py-1.5 rounded-lg border border-primary/10"
+                                  >
+                                    {file.newName}
+                                  </motion.div>
+                                </div>
+                              </div>
+                            </motion.div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-sm truncate mb-1 text-gray-200">
+                          {file.name}
                         </div>
                       )}
-                      <div className="text-xs text-gray-400">
-                        {formatFileSize(file.size)}
+                      <div className="flex items-center gap-2 mt-3">
+                        <div className="text-xs text-gray-400 bg-gray-800/30 px-2 py-1 rounded-md">
+                          {formatFileSize(file.size)}
+                        </div>
+                        <div className="text-xs text-gray-500">•</div>
+                        <div className="text-xs text-gray-400 bg-gray-800/30 px-2 py-1 rounded-md">
+                          {file.type.split("/")[1]?.toUpperCase() || "FILE"}
+                        </div>
                       </div>
                     </div>
                   </div>
 
                   {uploadProgress[file.name] !== undefined &&
                     uploadProgress[file.name] < 100 && (
-                      <div className="mt-2">
-                        <div className="h-1 bg-gray-600 rounded-full overflow-hidden">
+                      <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mt-4"
+                      >
+                        <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
                           <motion.div
-                            className="h-full bg-primary"
+                            className="h-full bg-gradient-to-r from-primary to-primary/50"
                             initial={{ width: "0%" }}
                             animate={{ width: `${uploadProgress[file.name]}%` }}
                             transition={{ duration: 0.5 }}
                           />
                         </div>
-                      </div>
+                        <div className="text-xs text-gray-400 mt-1 text-right">
+                          {Math.round(uploadProgress[file.name])}%
+                        </div>
+                      </motion.div>
                     )}
+
+                  {file.newName && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="absolute -top-2 left-0 px-2 py-1 bg-primary/10 rounded-full text-xs text-primary font-medium"
+                    >
+                      Renamed
+                    </motion.div>
+                  )}
                 </motion.div>
               ))}
             </AnimatePresence>
