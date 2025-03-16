@@ -70,6 +70,24 @@ interface Analytics {
   fileTypes: { [key: string]: number };
   averageFileSize: number;
   totalDownloads: number;
+  // New analytics fields
+  mostCommonFileTypes: Array<{ type: string; count: number }>;
+  peakUsageTimes: { [hour: string]: number };
+  averageFileSizeByType: { [type: string]: { total: number; count: number } };
+  successRate: number;
+  mostUsedBaseNames: Array<{ name: string; count: number }>;
+  monthlyStats: Array<{
+    month: string;
+    totalFiles: number;
+    totalRenames: number;
+  }>;
+  lastUsed: string;
+  errors: number;
+  totalSizeProcessed: number;
+}
+
+interface DataTransferItem {
+  webkitGetAsEntry: () => FileSystemEntry | null;
 }
 
 // Helper function to get the start date of the current week
@@ -113,6 +131,15 @@ const FileRenamer: React.FC = () => {
     fileTypes: {},
     averageFileSize: 0,
     totalDownloads: 0,
+    mostCommonFileTypes: [],
+    peakUsageTimes: {},
+    averageFileSizeByType: {},
+    successRate: 100,
+    mostUsedBaseNames: [],
+    monthlyStats: [],
+    lastUsed: "",
+    errors: 0,
+    totalSizeProcessed: 0,
   });
 
   // Add constant for max file size (100MB in bytes)
@@ -270,72 +297,235 @@ const FileRenamer: React.FC = () => {
     return file.type;
   };
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  const extractZipContents = async (file: File): Promise<FileWithPreview[]> => {
     try {
-      // Check if adding new files would exceed the limit
-      if (files.length + acceptedFiles.length > MAX_FILES) {
-        setError(
-          `Cannot add more than ${MAX_FILES} files at a time. Please process current files first.`
-        );
-        showToast(
-          `Maximum ${MAX_FILES} files allowed at a time. Please process current files first.`,
-          "error",
-          5000
-        );
-        return;
-      }
+      const zip = new JSZip();
+      const contents = await zip.loadAsync(file);
+      const extractedFiles: FileWithPreview[] = [];
 
-      // Validate file sizes first
-      const oversizedFiles = acceptedFiles.filter(
-        (file) => file.size > MAX_FILE_SIZE
-      );
-      if (oversizedFiles.length > 0) {
-        const fileNames = oversizedFiles.map((f) => f.name).join(", ");
-        setError(`Files exceeding 100MB limit: ${fileNames}`);
-        showToast(
-          `Files larger than 100MB are not allowed: ${fileNames}`,
-          "error",
-          5000
-        );
-        // Filter out oversized files
-        acceptedFiles = acceptedFiles.filter(
-          (file) => file.size <= MAX_FILE_SIZE
-        );
-        if (acceptedFiles.length === 0) return;
-      }
+      for (const [path, zipEntry] of Object.entries(contents.files)) {
+        // Skip directories
+        if (zipEntry.dir) continue;
 
-      const newFiles = acceptedFiles.map((file) => {
-        if (file.size > 1024 * 1024) {
-          simulateFileUploadProgress(file.name);
+        // Get the file data as array buffer
+        const data = await zipEntry.async("arraybuffer");
+        const blob = new Blob([data], { type: getFileTypeFromName(path) });
+
+        const customFile: FileWithPreview = {
+          name: path.split("/").pop() || path,
+          size: blob.size,
+          type: getFileTypeFromName(path),
+          lastModified: Date.now(),
+          slice: blob.slice.bind(blob),
+          arrayBuffer: blob.arrayBuffer.bind(blob),
+          stream: blob.stream.bind(blob),
+          text: blob.text.bind(blob),
+        };
+
+        if (customFile.type.startsWith("image/")) {
+          customFile.preview = URL.createObjectURL(blob);
         }
 
-        const type = getFileType(file);
-        const preview = type.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : undefined;
-
-        return {
-          name: file.name,
-          size: file.size,
-          type,
-          lastModified: file.lastModified,
-          slice: file.slice.bind(file),
-          arrayBuffer: file.arrayBuffer.bind(file),
-          stream: file.stream.bind(file),
-          text: file.text.bind(file),
-          preview,
-        } as FileWithPreview;
-      });
-
-      setFiles((prev) => [...prev, ...newFiles]);
-      if (!oversizedFiles.length) {
-        setError(null);
+        extractedFiles.push(customFile);
       }
-    } catch (err) {
-      setError("Failed to process dropped files. Please try again.");
-      console.error("Drop error:", err);
+
+      return extractedFiles;
+    } catch (error) {
+      console.error("Error extracting ZIP:", error);
+      throw new Error("Failed to extract ZIP file contents");
     }
-  }, []);
+  };
+
+  const getFileTypeFromName = (filename: string): string => {
+    const ext = filename.split(".").pop()?.toLowerCase() || "";
+    switch (ext) {
+      case "jpg":
+      case "jpeg":
+        return "image/jpeg";
+      case "png":
+        return "image/png";
+      case "gif":
+        return "image/gif";
+      case "mp4":
+        return "video/mp4";
+      case "mp3":
+        return "audio/mp3";
+      case "pdf":
+        return "application/pdf";
+      case "doc":
+      case "docx":
+        return "application/msword";
+      case "xls":
+      case "xlsx":
+        return "application/vnd.ms-excel";
+      default:
+        return "application/octet-stream";
+    }
+  };
+
+  const processDirectoryEntry = async (
+    entry: FileSystemEntry
+  ): Promise<FileWithPreview[]> => {
+    const files: FileWithPreview[] = [];
+
+    const processEntry = async (entry: FileSystemEntry) => {
+      if (entry.isFile) {
+        const fileEntry = entry as FileSystemFileEntry;
+        return new Promise<void>((resolve) => {
+          fileEntry.file(async (file) => {
+            const customFile: FileWithPreview = {
+              name: file.name,
+              size: file.size,
+              type: getFileType(file),
+              lastModified: file.lastModified,
+              slice: file.slice.bind(file),
+              arrayBuffer: file.arrayBuffer.bind(file),
+              stream: file.stream.bind(file),
+              text: file.text.bind(file),
+            };
+
+            if (customFile.type.startsWith("image/")) {
+              customFile.preview = URL.createObjectURL(file);
+            }
+
+            files.push(customFile);
+            resolve();
+          });
+        });
+      } else if (entry.isDirectory) {
+        const dirEntry = entry as FileSystemDirectoryEntry;
+        const dirReader = dirEntry.createReader();
+
+        const readEntries = (): Promise<FileSystemEntry[]> => {
+          return new Promise((resolve) => {
+            dirReader.readEntries(async (entries) => {
+              if (entries.length === 0) {
+                resolve([]);
+              } else {
+                const moreEntries = await readEntries();
+                resolve([...entries, ...moreEntries]);
+              }
+            });
+          });
+        };
+
+        const entries = await readEntries();
+        await Promise.all(entries.map((entry) => processEntry(entry)));
+      }
+    };
+
+    await processEntry(entry);
+    return files;
+  };
+
+  const onDrop = useCallback(
+    async (acceptedFiles: File[]) => {
+      try {
+        let newFiles: FileWithPreview[] = [];
+        const toastId = showToast("Processing files...", "loading");
+
+        // Process each dropped item
+        for (const file of acceptedFiles) {
+          // Check if it's a ZIP file
+          if (
+            file.type === "application/zip" ||
+            file.name.toLowerCase().endsWith(".zip")
+          ) {
+            const extractedFiles = await extractZipContents(file);
+            newFiles = [...newFiles, ...extractedFiles];
+            continue;
+          }
+
+          // Handle regular files
+          const customFile: FileWithPreview = {
+            name: file.name,
+            size: file.size,
+            type: getFileType(file),
+            lastModified: file.lastModified,
+            slice: file.slice.bind(file),
+            arrayBuffer: file.arrayBuffer.bind(file),
+            stream: file.stream.bind(file),
+            text: file.text.bind(file),
+          };
+
+          if (customFile.type.startsWith("image/")) {
+            customFile.preview = URL.createObjectURL(file);
+          }
+
+          newFiles.push(customFile);
+        }
+
+        // Handle folders through DataTransfer items
+        const dataTransfer = (acceptedFiles[0] as any).dataTransfer;
+        if (dataTransfer?.items) {
+          for (const item of Array.from(
+            dataTransfer.items
+          ) as DataTransferItem[]) {
+            const entry = item.webkitGetAsEntry();
+            if (entry?.isDirectory) {
+              const folderFiles = await processDirectoryEntry(entry);
+              newFiles = [...newFiles, ...folderFiles];
+            }
+          }
+        }
+
+        // Check total number of files
+        if (files.length + newFiles.length > MAX_FILES) {
+          removeToast(toastId);
+          setError(
+            `Cannot exceed ${MAX_FILES} files total. Please remove some files first.`
+          );
+          showToast(
+            `Maximum ${MAX_FILES} files allowed in total. You currently have ${files.length} files.`,
+            "error",
+            5000
+          );
+          return;
+        }
+
+        // Validate file sizes
+        const oversizedFiles = newFiles.filter(
+          (file) => file.size > MAX_FILE_SIZE
+        );
+        if (oversizedFiles.length > 0) {
+          const fileNames = oversizedFiles.map((f) => f.name).join(", ");
+          setError(`Files exceeding 100MB limit: ${fileNames}`);
+          showToast(
+            `Files larger than 100MB are not allowed: ${fileNames}`,
+            "error",
+            5000
+          );
+          // Filter out oversized files
+          newFiles = newFiles.filter((file) => file.size <= MAX_FILE_SIZE);
+        }
+
+        // Add progress simulation for large files
+        newFiles.forEach((file) => {
+          if (file.size > 1024 * 1024) {
+            simulateFileUploadProgress(file.name);
+          }
+        });
+
+        setFiles((prev) => [...prev, ...newFiles]);
+        removeToast(toastId);
+
+        if (newFiles.length > 0) {
+          showToast(
+            `Successfully processed ${newFiles.length} files`,
+            "success"
+          );
+        }
+
+        if (!oversizedFiles.length) {
+          setError(null);
+        }
+      } catch (err) {
+        setError("Failed to process dropped files. Please try again.");
+        console.error("Drop error:", err);
+      }
+    },
+    [files.length, showToast, removeToast]
+  );
 
   const simulateFileUploadProgress = (fileName: string) => {
     let progress = 0;
@@ -386,6 +576,12 @@ const FileRenamer: React.FC = () => {
         return {
           code: "file-too-large",
           message: `File is larger than 100MB`,
+        };
+      }
+      if (files.length >= MAX_FILES) {
+        return {
+          code: "too-many-files",
+          message: `Maximum ${MAX_FILES} files allowed`,
         };
       }
       return null;
@@ -454,6 +650,14 @@ const FileRenamer: React.FC = () => {
       return;
     }
 
+    if (files.length > MAX_FILES) {
+      showToast(
+        `Cannot rename more than ${MAX_FILES} files. Please remove some files first.`,
+        "error"
+      );
+      return;
+    }
+
     try {
       // First, create the new history entries
       const historyEntries: HistoryEntry[] = filteredFiles.map(
@@ -512,6 +716,14 @@ const FileRenamer: React.FC = () => {
     }
     if (filteredFiles.length === 0) {
       showToast("Please add some files first.", "error");
+      return;
+    }
+
+    if (files.length > MAX_FILES) {
+      showToast(
+        `Cannot download more than ${MAX_FILES} files. Please remove some files first.`,
+        "error"
+      );
       return;
     }
 
@@ -613,43 +825,119 @@ const FileRenamer: React.FC = () => {
 
   // Update analytics when files or history change
   useEffect(() => {
-    const newAnalytics: Analytics = {
-      weekStartDate: getWeekStartDate(),
-      totalFiles: files.length,
-      totalRenames: history.length,
-      fileTypes: files.reduce((acc, file) => {
-        const type = file.type.split("/")[0];
-        acc[type] = (acc[type] || 0) + 1;
-        return acc;
-      }, {} as { [key: string]: number }),
-      averageFileSize: files.length
-        ? files.reduce((sum, file) => sum + file.size, 0) / files.length
-        : 0,
-      totalDownloads: history.length, // This is a simple metric, could be more sophisticated
-    };
+    try {
+      // Load existing analytics
+      const savedAnalytics = localStorage.getItem("fileRenamerAnalytics");
+      let existingAnalytics: Analytics | null = null;
 
-    // Only update if the week has changed
-    if (analytics.weekStartDate !== newAnalytics.weekStartDate) {
-      // Save the new analytics and clear old data
+      if (savedAnalytics) {
+        existingAnalytics = JSON.parse(savedAnalytics);
+      }
+
+      const currentHour = new Date().getHours().toString().padStart(2, "0");
+      const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+
+      const newAnalytics: Analytics = {
+        weekStartDate: getWeekStartDate(),
+        totalFiles: (existingAnalytics?.totalFiles || 0) + files.length,
+        totalRenames: (existingAnalytics?.totalRenames || 0) + history.length,
+        fileTypes: files.reduce(
+          (acc, file) => {
+            const type = file.type.split("/")[0];
+            acc[type] = (acc[type] || 0) + 1;
+            return acc;
+          },
+          { ...(existingAnalytics?.fileTypes || {}) }
+        ),
+        averageFileSize: files.length
+          ? files.reduce((sum, file) => sum + file.size, 0) / files.length
+          : existingAnalytics?.averageFileSize || 0,
+        totalDownloads: existingAnalytics?.totalDownloads || 0,
+
+        // Calculate most common file types
+        mostCommonFileTypes: Object.entries(existingAnalytics?.fileTypes || {})
+          .map(([type, count]) => ({ type, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 5),
+
+        // Update peak usage times
+        peakUsageTimes: {
+          ...(existingAnalytics?.peakUsageTimes || {}),
+          [currentHour]:
+            ((existingAnalytics?.peakUsageTimes || {})[currentHour] || 0) + 1,
+        },
+
+        // Calculate average file size by type
+        averageFileSizeByType: files.reduce(
+          (acc: { [key: string]: { total: number; count: number } }, file) => {
+            const type = file.type.split("/")[0];
+            if (!acc[type]) {
+              acc[type] = { total: 0, count: 0 };
+            }
+            acc[type].total += file.size;
+            acc[type].count++;
+            return acc;
+          },
+          { ...(existingAnalytics?.averageFileSizeByType || {}) }
+        ),
+
+        // Calculate success rate
+        successRate: existingAnalytics
+          ? ((existingAnalytics.totalRenames -
+              (existingAnalytics.errors || 0)) /
+              (existingAnalytics.totalRenames || 1)) *
+            100
+          : 100,
+
+        // Track most used base names
+        mostUsedBaseNames: baseFileName
+          ? [
+              ...(existingAnalytics?.mostUsedBaseNames || []).filter(
+                (item) => item.name !== baseFileName
+              ),
+              { name: baseFileName, count: 1 },
+            ]
+              .sort((a, b) => b.count - a.count)
+              .slice(0, 5)
+          : existingAnalytics?.mostUsedBaseNames || [],
+
+        // Update monthly stats
+        monthlyStats: [
+          ...(existingAnalytics?.monthlyStats || []).filter(
+            (stat) => stat.month !== currentMonth
+          ),
+          {
+            month: currentMonth,
+            totalFiles:
+              files.length +
+              ((existingAnalytics?.monthlyStats || []).find(
+                (stat) => stat.month === currentMonth
+              )?.totalFiles || 0),
+            totalRenames:
+              history.length +
+              ((existingAnalytics?.monthlyStats || []).find(
+                (stat) => stat.month === currentMonth
+              )?.totalRenames || 0),
+          },
+        ],
+
+        lastUsed: new Date().toISOString(),
+        errors: existingAnalytics?.errors || 0,
+        totalSizeProcessed:
+          (existingAnalytics?.totalSizeProcessed || 0) +
+          files.reduce((sum, file) => sum + file.size, 0),
+      };
+
+      // Save the updated analytics
       localStorage.setItem(
         "fileRenamerAnalytics",
         JSON.stringify(newAnalytics)
       );
+      setAnalytics(newAnalytics);
+    } catch (err) {
+      console.error("Failed to update analytics:", err);
     }
-    setAnalytics(newAnalytics);
-  }, [files, history]);
-
-  // Load analytics from localStorage on mount
-  useEffect(() => {
-    const savedAnalytics = localStorage.getItem("fileRenamerAnalytics");
-    if (savedAnalytics) {
-      const parsed = JSON.parse(savedAnalytics);
-      // Only load if it's from the current week
-      if (parsed.weekStartDate === getWeekStartDate()) {
-        setAnalytics(parsed);
-      }
-    }
-  }, []);
+  }, [files, history, baseFileName]);
 
   // Update Help modal handlers
   const openHelp = () => {
@@ -679,6 +967,185 @@ const FileRenamer: React.FC = () => {
       toggleBodyScroll(false);
     };
   }, []);
+
+  // Update the Analytics modal UI to show new metrics
+  const renderAnalyticsModal = () => (
+    <AnimatePresence>
+      {showAnalytics && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={closeAnalytics}
+        >
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.9, opacity: 0 }}
+            className="bg-gray-800 p-6 rounded-lg max-w-4xl w-full mx-4 space-y-4 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center sticky top-0 bg-gray-800 py-2">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <FiBarChart2 className="text-primary" />
+                Analytics Dashboard
+              </h2>
+              <button
+                onClick={closeAnalytics}
+                className="text-gray-400 hover:text-white"
+              >
+                <FiX />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {/* Basic Stats */}
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-sm text-gray-400">
+                  Total Files Processed
+                </div>
+                <div className="text-2xl font-bold text-primary">
+                  {analytics.totalFiles}
+                </div>
+              </div>
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-sm text-gray-400">Success Rate</div>
+                <div className="text-2xl font-bold text-primary">
+                  {analytics.successRate.toFixed(1)}%
+                </div>
+              </div>
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-sm text-gray-400">
+                  Total Size Processed
+                </div>
+                <div className="text-2xl font-bold text-primary">
+                  {formatFileSize(analytics.totalSizeProcessed)}
+                </div>
+              </div>
+
+              {/* Most Common File Types */}
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-sm text-gray-400 mb-2">
+                  Most Common File Types
+                </div>
+                <div className="space-y-2">
+                  {analytics.mostCommonFileTypes.map(({ type, count }) => (
+                    <div
+                      key={type}
+                      className="flex justify-between items-center"
+                    >
+                      <span className="capitalize">{type}</span>
+                      <span className="text-primary font-bold">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Average File Size by Type */}
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-sm text-gray-400 mb-2">
+                  Average Size by Type
+                </div>
+                <div className="space-y-2">
+                  {Object.entries(analytics.averageFileSizeByType).map(
+                    ([type, data]) => (
+                      <div
+                        key={type}
+                        className="flex justify-between items-center"
+                      >
+                        <span className="capitalize">{type}</span>
+                        <span className="text-primary font-bold">
+                          {formatFileSize(data.total / data.count)}
+                        </span>
+                      </div>
+                    )
+                  )}
+                </div>
+              </div>
+
+              {/* Most Used Base Names */}
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-sm text-gray-400 mb-2">
+                  Popular Base Names
+                </div>
+                <div className="space-y-2">
+                  {analytics.mostUsedBaseNames.map(({ name, count }) => (
+                    <div
+                      key={name}
+                      className="flex justify-between items-center"
+                    >
+                      <span className="truncate">{name}</span>
+                      <span className="text-primary font-bold">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Monthly Trends */}
+              <div className="bg-gray-700 p-4 rounded-lg col-span-full">
+                <div className="text-sm text-gray-400 mb-2">
+                  Monthly Activity
+                </div>
+                <div className="space-y-2">
+                  {analytics.monthlyStats.map((stat) => (
+                    <div
+                      key={stat.month}
+                      className="flex justify-between items-center"
+                    >
+                      <span>
+                        {new Date(stat.month).toLocaleDateString(undefined, {
+                          year: "numeric",
+                          month: "long",
+                        })}
+                      </span>
+                      <div className="flex gap-4">
+                        <span className="text-primary">
+                          {stat.totalFiles} files
+                        </span>
+                        <span className="text-secondary">
+                          {stat.totalRenames} renames
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Last Used */}
+              <div className="bg-gray-700 p-4 rounded-lg col-span-full">
+                <div className="text-sm text-gray-400">Last Activity</div>
+                <div className="text-lg text-primary">
+                  {new Date(analytics.lastUsed).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+
+  // Add a useEffect to monitor total file count
+  useEffect(() => {
+    if (files.length > MAX_FILES) {
+      setError(
+        `You have exceeded the ${MAX_FILES} file limit. Please remove some files.`
+      );
+      showToast(
+        `Maximum ${MAX_FILES} files allowed. Please remove excess files.`,
+        "error",
+        5000
+      );
+    }
+  }, [files.length]);
+
+  // Add file count indicator color
+  const getFileCountColor = (count: number) => {
+    if (count >= MAX_FILES) return "text-red-400 bg-red-400/20";
+    if (count >= MAX_FILES * 0.8) return "text-yellow-400 bg-yellow-400/20";
+    return "text-gray-400 bg-gray-700";
+  };
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -925,9 +1392,24 @@ const FileRenamer: React.FC = () => {
                   className="w-full pl-10 pr-4 py-2 rounded-lg bg-gray-700 border border-gray-600 focus:border-primary focus:outline-none"
                 />
               </div>
-              <div className="flex gap-2 items-center">
-                <div className="text-sm text-gray-400 bg-gray-700 px-3 py-2 rounded-lg">
-                  {filteredFiles.length}/{MAX_FILES} files
+              <div className="flex items-center gap-2">
+                <div
+                  className={`px-3 py-1.5 rounded-full flex items-center gap-2 ${getFileCountColor(
+                    filteredFiles.length
+                  )}`}
+                >
+                  <span>
+                    {filteredFiles.length}/{MAX_FILES} files
+                  </span>
+                  {filteredFiles.length >= MAX_FILES * 0.8 && (
+                    <motion.span
+                      initial={{ scale: 0.5, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ type: "spring" }}
+                    >
+                      <FiAlertCircle className="w-4 h-4" />
+                    </motion.span>
+                  )}
                 </div>
                 <motion.button
                   whileHover={{ scale: 1.05 }}
@@ -1198,91 +1680,8 @@ const FileRenamer: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Analytics Modal */}
-      <AnimatePresence>
-        {showAnalytics && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-            onClick={closeAnalytics}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-gray-800 p-6 rounded-lg max-w-lg w-full mx-4 space-y-4"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex justify-between items-center">
-                <h2 className="text-xl font-bold flex items-center gap-2">
-                  <FiBarChart2 className="text-primary" />
-                  Weekly Analytics
-                </h2>
-                <button
-                  onClick={closeAnalytics}
-                  className="text-gray-400 hover:text-white"
-                >
-                  <FiX />
-                </button>
-              </div>
-              <div className="space-y-4">
-                <p className="text-sm text-gray-400">
-                  Week of{" "}
-                  {new Date(analytics.weekStartDate).toLocaleDateString()}
-                </p>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-gray-700 p-4 rounded-lg">
-                    <div className="text-sm text-gray-400">Total Files</div>
-                    <div className="text-2xl font-bold text-primary">
-                      {analytics.totalFiles}
-                    </div>
-                  </div>
-                  <div className="bg-gray-700 p-4 rounded-lg">
-                    <div className="text-sm text-gray-400">Total Renames</div>
-                    <div className="text-2xl font-bold text-primary">
-                      {analytics.totalRenames}
-                    </div>
-                  </div>
-                  <div className="bg-gray-700 p-4 rounded-lg">
-                    <div className="text-sm text-gray-400">
-                      Average File Size
-                    </div>
-                    <div className="text-2xl font-bold text-primary">
-                      {formatFileSize(analytics.averageFileSize)}
-                    </div>
-                  </div>
-                  <div className="bg-gray-700 p-4 rounded-lg">
-                    <div className="text-sm text-gray-400">Total Downloads</div>
-                    <div className="text-2xl font-bold text-primary">
-                      {analytics.totalDownloads}
-                    </div>
-                  </div>
-                </div>
-                <div className="bg-gray-700 p-4 rounded-lg">
-                  <div className="text-sm text-gray-400 mb-2">File Types</div>
-                  <div className="space-y-2">
-                    {Object.entries(analytics.fileTypes).map(
-                      ([type, count]) => (
-                        <div
-                          key={type}
-                          className="flex justify-between items-center"
-                        >
-                          <span className="capitalize">{type}</span>
-                          <span className="text-primary font-bold">
-                            {count}
-                          </span>
-                        </div>
-                      )
-                    )}
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Replace the existing Analytics modal with the new one */}
+      {renderAnalyticsModal()}
     </div>
   );
 };
