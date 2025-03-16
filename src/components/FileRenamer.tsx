@@ -25,6 +25,9 @@ import {
   FiFile,
   FiBook,
   FiTable,
+  FiHelpCircle,
+  FiBarChart2,
+  FiInfo,
 } from "react-icons/fi";
 import JSZip from "jszip";
 
@@ -60,6 +63,33 @@ interface Toast {
   duration?: number;
 }
 
+interface Analytics {
+  weekStartDate: string;
+  totalFiles: number;
+  totalRenames: number;
+  fileTypes: { [key: string]: number };
+  averageFileSize: number;
+  totalDownloads: number;
+}
+
+// Helper function to get the start date of the current week
+const getWeekStartDate = () => {
+  const now = new Date();
+  const dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
+  const diff = now.getDate() - dayOfWeek;
+  const startOfWeek = new Date(now.setDate(diff));
+  return startOfWeek.toISOString().split("T")[0];
+};
+
+// Helper function to toggle body scroll
+const toggleBodyScroll = (disable: boolean) => {
+  if (disable) {
+    document.body.style.overflow = "hidden";
+  } else {
+    document.body.style.overflow = "auto";
+  }
+};
+
 const FileRenamer: React.FC = () => {
   const [files, setFiles] = useState<FileWithPreview[]>([]);
   const [baseFileName, setBaseFileName] = useState("");
@@ -74,6 +104,19 @@ const FileRenamer: React.FC = () => {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const progressIntervals = useRef<{ [key: string]: NodeJS.Timeout }>({});
   const [selectedFileType, setSelectedFileType] = useState<string>("all");
+  const [showHelp, setShowHelp] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
+  const [analytics, setAnalytics] = useState<Analytics>({
+    weekStartDate: getWeekStartDate(),
+    totalFiles: 0,
+    totalRenames: 0,
+    fileTypes: {},
+    averageFileSize: 0,
+    totalDownloads: 0,
+  });
+
+  // Add constant for max file size (100MB in bytes)
+  const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB in bytes
 
   // Toast functions
   const showToast = (
@@ -227,6 +270,25 @@ const FileRenamer: React.FC = () => {
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     try {
+      // Validate file sizes first
+      const oversizedFiles = acceptedFiles.filter(
+        (file) => file.size > MAX_FILE_SIZE
+      );
+      if (oversizedFiles.length > 0) {
+        const fileNames = oversizedFiles.map((f) => f.name).join(", ");
+        setError(`Files exceeding 100MB limit: ${fileNames}`);
+        showToast(
+          `Files larger than 100MB are not allowed: ${fileNames}`,
+          "error",
+          5000
+        );
+        // Filter out oversized files
+        acceptedFiles = acceptedFiles.filter(
+          (file) => file.size <= MAX_FILE_SIZE
+        );
+        if (acceptedFiles.length === 0) return;
+      }
+
       const newFiles = acceptedFiles.map((file) => {
         if (file.size > 1024 * 1024) {
           simulateFileUploadProgress(file.name);
@@ -251,7 +313,9 @@ const FileRenamer: React.FC = () => {
       });
 
       setFiles((prev) => [...prev, ...newFiles]);
-      setError(null);
+      if (!oversizedFiles.length) {
+        setError(null);
+      }
     } catch (err) {
       setError("Failed to process dropped files. Please try again.");
       console.error("Drop error:", err);
@@ -281,7 +345,7 @@ const FileRenamer: React.FC = () => {
     progressIntervals.current[fileName] = interval;
   };
 
-  const { getRootProps, getInputProps } = useDropzone({
+  const { getRootProps, getInputProps, isDragReject } = useDropzone({
     onDrop,
     onDragEnter: () => setIsDragging(true),
     onDragLeave: () => setIsDragging(false),
@@ -300,7 +364,16 @@ const FileRenamer: React.FC = () => {
       "text/css": [".css"],
       "text/javascript": [".js"],
       "application/xml": [".xml"],
-      // Add more file types as needed
+    },
+    maxSize: MAX_FILE_SIZE,
+    validator: (file) => {
+      if (file.size > MAX_FILE_SIZE) {
+        return {
+          code: "file-too-large",
+          message: `File is larger than 100MB`,
+        };
+      }
+      return null;
     },
   });
 
@@ -523,6 +596,75 @@ const FileRenamer: React.FC = () => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
+  // Update analytics when files or history change
+  useEffect(() => {
+    const newAnalytics: Analytics = {
+      weekStartDate: getWeekStartDate(),
+      totalFiles: files.length,
+      totalRenames: history.length,
+      fileTypes: files.reduce((acc, file) => {
+        const type = file.type.split("/")[0];
+        acc[type] = (acc[type] || 0) + 1;
+        return acc;
+      }, {} as { [key: string]: number }),
+      averageFileSize: files.length
+        ? files.reduce((sum, file) => sum + file.size, 0) / files.length
+        : 0,
+      totalDownloads: history.length, // This is a simple metric, could be more sophisticated
+    };
+
+    // Only update if the week has changed
+    if (analytics.weekStartDate !== newAnalytics.weekStartDate) {
+      // Save the new analytics and clear old data
+      localStorage.setItem(
+        "fileRenamerAnalytics",
+        JSON.stringify(newAnalytics)
+      );
+    }
+    setAnalytics(newAnalytics);
+  }, [files, history]);
+
+  // Load analytics from localStorage on mount
+  useEffect(() => {
+    const savedAnalytics = localStorage.getItem("fileRenamerAnalytics");
+    if (savedAnalytics) {
+      const parsed = JSON.parse(savedAnalytics);
+      // Only load if it's from the current week
+      if (parsed.weekStartDate === getWeekStartDate()) {
+        setAnalytics(parsed);
+      }
+    }
+  }, []);
+
+  // Update Help modal handlers
+  const openHelp = () => {
+    setShowHelp(true);
+    toggleBodyScroll(true);
+  };
+
+  const closeHelp = () => {
+    setShowHelp(false);
+    toggleBodyScroll(false);
+  };
+
+  // Update Analytics modal handlers
+  const openAnalytics = () => {
+    setShowAnalytics(true);
+    toggleBodyScroll(true);
+  };
+
+  const closeAnalytics = () => {
+    setShowAnalytics(false);
+    toggleBodyScroll(false);
+  };
+
+  // Cleanup scroll lock on unmount
+  useEffect(() => {
+    return () => {
+      toggleBodyScroll(false);
+    };
+  }, []);
+
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
       {/* Toast Container */}
@@ -606,35 +748,65 @@ const FileRenamer: React.FC = () => {
           <FiEdit3 className="text-primary" />
           File Renamer
         </h1>
-        {files.length > 0 && (
+        <div className="flex items-center gap-2">
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
-            onClick={handleClearAll}
-            className="px-4 py-2 bg-red-500 text-white rounded-lg flex items-center gap-2 hover:bg-red-600"
+            onClick={openHelp}
+            className="px-4 py-2 bg-gray-700 text-white rounded-lg flex items-center gap-2 hover:bg-gray-600"
           >
-            <FiTrash2 />
-            Clear All
+            <FiHelpCircle />
+            Help
           </motion.button>
-        )}
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={openAnalytics}
+            className="px-4 py-2 bg-gray-700 text-white rounded-lg flex items-center gap-2 hover:bg-gray-600"
+          >
+            <FiBarChart2 />
+            Analytics
+          </motion.button>
+          {files.length > 0 && (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={handleClearAll}
+              className="px-4 py-2 bg-red-500 text-white rounded-lg flex items-center gap-2 hover:bg-red-600"
+            >
+              <FiTrash2 />
+              Clear All
+            </motion.button>
+          )}
+        </div>
       </div>
 
       <div {...getRootProps()}>
         <motion.div
           className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
-            isDragging ? "border-primary bg-primary/10" : "border-gray-600"
+            isDragReject
+              ? "border-red-500 bg-red-500/10"
+              : isDragging
+              ? "border-primary bg-primary/10"
+              : "border-gray-600"
           }`}
           animate={{ scale: isDragging ? 1.02 : 1 }}
           whileHover={{ scale: 1.01 }}
           whileTap={{ scale: 0.99 }}
         >
           <input {...getInputProps()} />
-          <FiUpload className="mx-auto text-4xl mb-4 text-primary" />
+          <FiUpload
+            className={`mx-auto text-4xl mb-4 ${
+              isDragReject ? "text-red-500" : "text-primary"
+            }`}
+          />
           <p className="text-lg">
-            Drag & drop files here, or click to select files
+            {isDragReject
+              ? "File too large! Maximum size is 100MB"
+              : "Drag & drop files here, or click to select files"}
           </p>
           <p className="text-sm text-gray-400 mt-2">
-            Supports images, videos, documents, and more
+            Supports images, videos, documents, and more (max 100MB per file)
           </p>
         </motion.div>
       </div>
@@ -885,6 +1057,150 @@ const FileRenamer: React.FC = () => {
           </div>
         </motion.div>
       )}
+
+      {/* Help Modal */}
+      <AnimatePresence>
+        {showHelp && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+            onClick={closeHelp}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-gray-800 p-6 rounded-lg max-w-lg w-full mx-4 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center">
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <FiHelpCircle className="text-primary" />
+                  How to Use File Renamer
+                </h2>
+                <button
+                  onClick={closeHelp}
+                  className="text-gray-400 hover:text-white"
+                >
+                  <FiX />
+                </button>
+              </div>
+              <div className="space-y-3 text-gray-300">
+                <p className="flex items-center gap-2">
+                  <FiUpload className="text-primary" />
+                  <span>Drag and drop files or click to select files</span>
+                </p>
+                <p className="flex items-center gap-2">
+                  <FiEdit3 className="text-primary" />
+                  <span>Enter a base name for your files</span>
+                </p>
+                <p className="flex items-center gap-2">
+                  <FiGrid className="text-primary" />
+                  <span>
+                    Filter files by type using the buttons above the file list
+                  </span>
+                </p>
+                <p className="flex items-center gap-2">
+                  <FiDownload className="text-primary" />
+                  <span>Download renamed files as a ZIP archive</span>
+                </p>
+                <p className="flex items-center gap-2">
+                  <FiClock className="text-primary" />
+                  <span>View rename history to track your changes</span>
+                </p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Analytics Modal */}
+      <AnimatePresence>
+        {showAnalytics && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+            onClick={closeAnalytics}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-gray-800 p-6 rounded-lg max-w-lg w-full mx-4 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center">
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <FiBarChart2 className="text-primary" />
+                  Weekly Analytics
+                </h2>
+                <button
+                  onClick={closeAnalytics}
+                  className="text-gray-400 hover:text-white"
+                >
+                  <FiX />
+                </button>
+              </div>
+              <div className="space-y-4">
+                <p className="text-sm text-gray-400">
+                  Week of{" "}
+                  {new Date(analytics.weekStartDate).toLocaleDateString()}
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-gray-700 p-4 rounded-lg">
+                    <div className="text-sm text-gray-400">Total Files</div>
+                    <div className="text-2xl font-bold text-primary">
+                      {analytics.totalFiles}
+                    </div>
+                  </div>
+                  <div className="bg-gray-700 p-4 rounded-lg">
+                    <div className="text-sm text-gray-400">Total Renames</div>
+                    <div className="text-2xl font-bold text-primary">
+                      {analytics.totalRenames}
+                    </div>
+                  </div>
+                  <div className="bg-gray-700 p-4 rounded-lg">
+                    <div className="text-sm text-gray-400">
+                      Average File Size
+                    </div>
+                    <div className="text-2xl font-bold text-primary">
+                      {formatFileSize(analytics.averageFileSize)}
+                    </div>
+                  </div>
+                  <div className="bg-gray-700 p-4 rounded-lg">
+                    <div className="text-sm text-gray-400">Total Downloads</div>
+                    <div className="text-2xl font-bold text-primary">
+                      {analytics.totalDownloads}
+                    </div>
+                  </div>
+                </div>
+                <div className="bg-gray-700 p-4 rounded-lg">
+                  <div className="text-sm text-gray-400 mb-2">File Types</div>
+                  <div className="space-y-2">
+                    {Object.entries(analytics.fileTypes).map(
+                      ([type, count]) => (
+                        <div
+                          key={type}
+                          className="flex justify-between items-center"
+                        >
+                          <span className="capitalize">{type}</span>
+                          <span className="text-primary font-bold">
+                            {count}
+                          </span>
+                        </div>
+                      )
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
